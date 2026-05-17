@@ -45,7 +45,8 @@ def _get_devices(override: str | None) -> tuple[str, str]:
 
 
 _SAMPLE_RATE = 16_000
-_MAX_CHUNK_S = 20 * 60  # 20-minute chunks keep STFT intermediate under ~400 MB
+_MAX_CHUNK_S = 20 * 60   # 20-minute chunks keep STFT intermediate under ~400 MB
+_OVERLAP_S = 30          # overlap so sentences straddling a boundary are heard fully
 
 
 def _transcribe_chunk(model, audio_chunk, offset_s: float) -> tuple[list, str]:
@@ -97,6 +98,7 @@ def _transcribe_chunk(model, audio_chunk, offset_s: float) -> tuple[list, str]:
 def _transcribe_with_progress(model, audio, trans_device: str) -> tuple[list, str]:
     total_samples = len(audio)
     max_samples = _MAX_CHUNK_S * _SAMPLE_RATE
+    overlap_samples = _OVERLAP_S * _SAMPLE_RATE
 
     if total_samples <= max_samples:
         return _transcribe_chunk(model, audio, 0.0)
@@ -104,15 +106,25 @@ def _transcribe_with_progress(model, audio, trans_device: str) -> tuple[list, st
     n_chunks = (total_samples + max_samples - 1) // max_samples
     all_segments: list[dict] = []
     language: str = "en"
+    pos = 0
 
     for i in range(n_chunks):
-        chunk_start = i * max_samples
-        chunk_end = min(chunk_start + max_samples, total_samples)
-        print(f"  chunk {i + 1}/{n_chunks} ({chunk_start // _SAMPLE_RATE}s – {chunk_end // _SAMPLE_RATE}s)")
-        segments, lang = _transcribe_chunk(model, audio[chunk_start:chunk_end], chunk_start / _SAMPLE_RATE)
+        boundary = min(pos + max_samples, total_samples)   # end of this chunk's own territory
+        chunk_end = min(boundary + overlap_samples, total_samples)  # includes trailing overlap
+        offset_s = pos / _SAMPLE_RATE
+
+        print(f"  chunk {i + 1}/{n_chunks} ({pos // _SAMPLE_RATE}s – {boundary // _SAMPLE_RATE}s)")
+        segments, lang = _transcribe_chunk(model, audio[pos:chunk_end], offset_s)
+
+        # Discard segments that start inside the overlap region — the next chunk owns those.
+        if boundary < total_samples:
+            cutoff_s = boundary / _SAMPLE_RATE
+            segments = [s for s in segments if s["start"] < cutoff_s]
+
         if i == 0:
             language = lang
         all_segments.extend(segments)
+        pos = boundary
 
     return all_segments, language
 
