@@ -44,8 +44,11 @@ def _get_devices(override: str | None) -> tuple[str, str]:
     return "cpu", "cpu"
 
 
-def _transcribe_with_progress(model, audio, trans_device: str) -> tuple[list, str]:
-    """Call faster-whisper's generator directly so we can show a % progress bar."""
+_SAMPLE_RATE = 16_000
+_MAX_CHUNK_S = 20 * 60  # 20-minute chunks keep STFT intermediate under ~400 MB
+
+
+def _transcribe_chunk(model, audio_chunk, offset_s: float) -> tuple[list, str]:
     from rich.progress import (
         BarColumn,
         Progress,
@@ -55,7 +58,7 @@ def _transcribe_with_progress(model, audio, trans_device: str) -> tuple[list, st
     )
 
     segments_gen, info = model.model.transcribe(
-        audio,
+        audio_chunk,
         task="transcribe",
         beam_size=5,
         word_timestamps=True,
@@ -73,17 +76,45 @@ def _transcribe_with_progress(model, audio, trans_device: str) -> tuple[list, st
         task_id = progress.add_task("", total=info.duration)
         for seg in segments_gen:
             segments.append({
-                "start": seg.start,
-                "end": seg.end,
+                "start": seg.start + offset_s,
+                "end": seg.end + offset_s,
                 "text": seg.text,
                 "words": [
-                    {"word": w.word, "start": w.start, "end": w.end, "score": w.probability}
+                    {
+                        "word": w.word,
+                        "start": w.start + offset_s,
+                        "end": w.end + offset_s,
+                        "score": w.probability,
+                    }
                     for w in (seg.words or [])
                 ],
             })
             progress.update(task_id, completed=min(seg.end, info.duration))
 
     return segments, info.language
+
+
+def _transcribe_with_progress(model, audio, trans_device: str) -> tuple[list, str]:
+    total_samples = len(audio)
+    max_samples = _MAX_CHUNK_S * _SAMPLE_RATE
+
+    if total_samples <= max_samples:
+        return _transcribe_chunk(model, audio, 0.0)
+
+    n_chunks = (total_samples + max_samples - 1) // max_samples
+    all_segments: list[dict] = []
+    language: str = "en"
+
+    for i in range(n_chunks):
+        chunk_start = i * max_samples
+        chunk_end = min(chunk_start + max_samples, total_samples)
+        print(f"  chunk {i + 1}/{n_chunks} ({chunk_start // _SAMPLE_RATE}s – {chunk_end // _SAMPLE_RATE}s)")
+        segments, lang = _transcribe_chunk(model, audio[chunk_start:chunk_end], chunk_start / _SAMPLE_RATE)
+        if i == 0:
+            language = lang
+        all_segments.extend(segments)
+
+    return all_segments, language
 
 
 def transcribe(
@@ -132,7 +163,7 @@ def transcribe(
         diarize_kwargs["max_speakers"] = max_speakers
 
     with Status("[bold]Diarizing speakers…[/bold]", console=console):
-        diarize_model = whisperx.DiarizationPipeline(
+        diarize_model = whisperx.diarize.DiarizationPipeline(
             use_auth_token=hf_token, device=torch_device
         )
         diarize_segments = diarize_model(audio_path, **diarize_kwargs)

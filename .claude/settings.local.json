@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.\\\\.venv\\\\Scripts\\\\python.exe *)",
+      "PowerShell(.\\\\.venv\\\\Scripts\\\\python.exe -c \"import whisperx; print\\(dir\\(whisperx\\)\\)\")",
+      "PowerShell(.\\\\.venv\\\\Scripts\\\\python.exe -c \"from whisperx import diarize; print\\(dir\\(diarize\\)\\)\")"
+    ]
+  }
+}
