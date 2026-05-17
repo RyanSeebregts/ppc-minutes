@@ -80,11 +80,11 @@ def review(cache: dict, audio_path: str) -> dict:
 
             while True:
                 console.print(
-                    "\n  [bold][n][/bold] Name  "
-                    "[bold][s][/bold] Skip  "
-                    "[bold][m][/bold] Merge into another  "
-                    "[bold][r][/bold] Replay clips  "
-                    "[bold][q][/bold] Save & quit"
+                    "\n  [bold cyan]n[/bold cyan] Name  "
+                    "[bold cyan]s[/bold cyan] Skip  "
+                    "[bold cyan]m[/bold cyan] Merge into another  "
+                    "[bold cyan]r[/bold cyan] Replay clips  "
+                    "[bold cyan]q[/bold cyan] Save & quit"
                 )
                 choice = Prompt.ask(
                     "  >", choices=["n", "s", "m", "r", "q"], show_choices=False
