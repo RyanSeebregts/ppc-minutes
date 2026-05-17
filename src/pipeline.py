@@ -1,0 +1,164 @@
+import json
+from pathlib import Path
+
+CACHE_SUFFIX = ".diarize_cache.json"
+
+
+def get_cache_path(audio_path: str) -> Path:
+    p = Path(audio_path)
+    return p.parent / (p.stem + CACHE_SUFFIX)
+
+
+def load_cache(audio_path: str) -> dict | None:
+    cache_path = get_cache_path(audio_path)
+    if cache_path.exists():
+        with open(cache_path, encoding="utf-8") as f:
+            return json.load(f)
+    return None
+
+
+def save_cache(cache: dict, audio_path: str) -> None:
+    cache_path = get_cache_path(audio_path)
+    with open(cache_path, "w", encoding="utf-8") as f:
+        json.dump(cache, f, indent=2, ensure_ascii=False)
+
+
+def _get_devices(override: str | None) -> tuple[str, str]:
+    """Return (transcription_device, torch_device).
+
+    faster-whisper (ctranslate2) doesn't support MPS, so we always use CPU
+    for the transcription step on Apple Silicon. PyTorch alignment and
+    diarization can use MPS.
+    """
+    import torch
+
+    if override:
+        torch_dev = override
+        trans_dev = "cpu" if override == "mps" else override
+        return trans_dev, torch_dev
+
+    if torch.backends.mps.is_available():
+        return "cpu", "mps"
+    if torch.cuda.is_available():
+        return "cuda", "cuda"
+    return "cpu", "cpu"
+
+
+def _transcribe_with_progress(model, audio, trans_device: str) -> tuple[list, str]:
+    """Call faster-whisper's generator directly so we can show a % progress bar."""
+    from rich.progress import (
+        BarColumn,
+        Progress,
+        TaskProgressColumn,
+        TextColumn,
+        TimeRemainingColumn,
+    )
+
+    segments_gen, info = model.model.transcribe(
+        audio,
+        task="transcribe",
+        beam_size=5,
+        word_timestamps=True,
+        vad_filter=True,
+        vad_parameters={"min_silence_duration_ms": 500},
+    )
+
+    segments: list[dict] = []
+    with Progress(
+        TextColumn("[bold cyan]Transcribing"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TimeRemainingColumn(),
+    ) as progress:
+        task_id = progress.add_task("", total=info.duration)
+        for seg in segments_gen:
+            segments.append({
+                "start": seg.start,
+                "end": seg.end,
+                "text": seg.text,
+                "words": [
+                    {"word": w.word, "start": w.start, "end": w.end, "score": w.probability}
+                    for w in (seg.words or [])
+                ],
+            })
+            progress.update(task_id, completed=min(seg.end, info.duration))
+
+    return segments, info.language
+
+
+def transcribe(
+    audio_path: str,
+    model_name: str = "large-v3",
+    hf_token: str | None = None,
+    min_speakers: int | None = None,
+    max_speakers: int | None = None,
+    device_override: str | None = None,
+) -> dict:
+    import whisperx
+    from rich.console import Console
+    from rich.status import Status
+
+    console = Console()
+    trans_device, torch_device = _get_devices(device_override)
+    compute_type = "float16" if trans_device == "cuda" else "int8"
+
+    console.print(f"[dim]Transcription device : {trans_device} ({compute_type})[/dim]")
+    console.print(f"[dim]Alignment/diarization: {torch_device}[/dim]")
+
+    # --- Transcription ---
+    console.print(f"\n[bold]Loading Whisper model[/bold] [cyan]{model_name}[/cyan]…")
+    model = whisperx.load_model(model_name, trans_device, compute_type=compute_type)
+
+    audio = whisperx.load_audio(audio_path)
+    segments, language = _transcribe_with_progress(model, audio, trans_device)
+    console.print(f"[green]✓[/green] Detected language: [cyan]{language}[/cyan]")
+
+    # --- Alignment ---
+    with Status("[bold]Aligning transcription…[/bold]", console=console):
+        model_a, metadata = whisperx.load_align_model(
+            language_code=language, device=torch_device
+        )
+        result = whisperx.align(
+            segments, model_a, metadata, audio, torch_device,
+            return_char_alignments=False,
+        )
+    console.print("[green]✓[/green] Alignment done.")
+
+    # --- Diarization ---
+    diarize_kwargs: dict = {}
+    if min_speakers is not None:
+        diarize_kwargs["min_speakers"] = min_speakers
+    if max_speakers is not None:
+        diarize_kwargs["max_speakers"] = max_speakers
+
+    with Status("[bold]Diarizing speakers…[/bold]", console=console):
+        diarize_model = whisperx.DiarizationPipeline(
+            use_auth_token=hf_token, device=torch_device
+        )
+        diarize_segments = diarize_model(audio_path, **diarize_kwargs)
+        result = whisperx.assign_word_speakers(diarize_segments, result)
+    console.print("[green]✓[/green] Diarization done.")
+
+    # --- Build flat segment list ---
+    segments = []
+    for seg in result["segments"]:
+        text = seg.get("text", "").strip()
+        if not text:
+            continue
+        segments.append({
+            "start": round(float(seg["start"]), 3),
+            "end": round(float(seg["end"]), 3),
+            "speaker": seg.get("speaker") or "SPEAKER_00",
+            "text": text,
+        })
+
+    cache: dict = {
+        "audio_path": str(Path(audio_path).resolve()),
+        "model": model_name,
+        "segments": segments,
+        "speaker_names": {},
+        "merges": [],
+    }
+    save_cache(cache, audio_path)
+    console.print(f"[green]✓[/green] {len(segments)} segments saved to cache.")
+    return cache

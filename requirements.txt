@@ -1,0 +1,12 @@
+# Core
+whisperx
+pyannote.audio>=3.1.0
+
+# Audio clip extraction (requires ffmpeg on PATH)
+pydub
+
+# Terminal UI
+rich
+
+# Load .env file
+python-dotenv
