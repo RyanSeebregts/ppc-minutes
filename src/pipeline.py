@@ -176,7 +176,7 @@ def transcribe(
 
     with Status("[bold]Diarizing speakers…[/bold]", console=console):
         diarize_model = whisperx.diarize.DiarizationPipeline(
-            use_auth_token=hf_token, device=torch_device
+            token=hf_token, device=torch_device
         )
         diarize_segments = diarize_model(audio_path, **diarize_kwargs)
         result = whisperx.assign_word_speakers(diarize_segments, result)
