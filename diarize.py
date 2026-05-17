@@ -42,6 +42,10 @@ def main() -> None:
         help="Re-transcribe even if a cache file already exists"
     )
     parser.add_argument(
+        "--language", default=None,
+        help="Audio language code, e.g. 'en' (skips per-chunk detection, improves accuracy)"
+    )
+    parser.add_argument(
         "--device",
         help="Override compute device (mps / cuda / cpu)"
     )
@@ -86,6 +90,7 @@ def main() -> None:
             min_speakers=args.min_speakers,
             max_speakers=args.max_speakers,
             device_override=args.device,
+            language=args.language,
         )
 
     # --- Interactive review ---

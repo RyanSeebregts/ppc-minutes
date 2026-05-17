@@ -49,7 +49,7 @@ _MAX_CHUNK_S = 20 * 60   # 20-minute chunks keep STFT intermediate under ~400 MB
 _OVERLAP_S = 30          # overlap so sentences straddling a boundary are heard fully
 
 
-def _transcribe_chunk(model, audio_chunk, offset_s: float) -> tuple[list, str]:
+def _transcribe_chunk(model, audio_chunk, offset_s: float, language: str | None = None) -> tuple[list, str]:
     from rich.progress import (
         BarColumn,
         Progress,
@@ -61,6 +61,7 @@ def _transcribe_chunk(model, audio_chunk, offset_s: float) -> tuple[list, str]:
     segments_gen, info = model.model.transcribe(
         audio_chunk,
         task="transcribe",
+        language=language,
         beam_size=5,
         word_timestamps=True,
         vad_filter=True,
@@ -95,38 +96,37 @@ def _transcribe_chunk(model, audio_chunk, offset_s: float) -> tuple[list, str]:
     return segments, info.language
 
 
-def _transcribe_with_progress(model, audio, trans_device: str) -> tuple[list, str]:
+def _transcribe_with_progress(model, audio, trans_device: str, language: str | None = None) -> tuple[list, str]:
     total_samples = len(audio)
     max_samples = _MAX_CHUNK_S * _SAMPLE_RATE
     overlap_samples = _OVERLAP_S * _SAMPLE_RATE
 
     if total_samples <= max_samples:
-        return _transcribe_chunk(model, audio, 0.0)
+        return _transcribe_chunk(model, audio, 0.0, language)
 
     n_chunks = (total_samples + max_samples - 1) // max_samples
     all_segments: list[dict] = []
-    language: str = "en"
+    detected_language: str = language or "en"
     pos = 0
 
     for i in range(n_chunks):
-        boundary = min(pos + max_samples, total_samples)   # end of this chunk's own territory
-        chunk_end = min(boundary + overlap_samples, total_samples)  # includes trailing overlap
+        boundary = min(pos + max_samples, total_samples)
+        chunk_end = min(boundary + overlap_samples, total_samples)
         offset_s = pos / _SAMPLE_RATE
 
         print(f"  chunk {i + 1}/{n_chunks} ({pos // _SAMPLE_RATE}s – {boundary // _SAMPLE_RATE}s)")
-        segments, lang = _transcribe_chunk(model, audio[pos:chunk_end], offset_s)
+        segments, lang = _transcribe_chunk(model, audio[pos:chunk_end], offset_s, language)
 
-        # Discard segments that start inside the overlap region — the next chunk owns those.
         if boundary < total_samples:
             cutoff_s = boundary / _SAMPLE_RATE
             segments = [s for s in segments if s["start"] < cutoff_s]
 
-        if i == 0:
-            language = lang
+        if i == 0 and language is None:
+            detected_language = lang
         all_segments.extend(segments)
         pos = boundary
 
-    return all_segments, language
+    return all_segments, detected_language
 
 
 def transcribe(
@@ -136,6 +136,7 @@ def transcribe(
     min_speakers: int | None = None,
     max_speakers: int | None = None,
     device_override: str | None = None,
+    language: str | None = None,
 ) -> dict:
     import whisperx
     from rich.console import Console
@@ -143,7 +144,12 @@ def transcribe(
 
     console = Console()
     trans_device, torch_device = _get_devices(device_override)
-    compute_type = "float16" if trans_device == "cuda" else "int8"
+    if trans_device == "cuda":
+        compute_type = "float16"
+    elif trans_device == "cpu":
+        compute_type = "int8_float32"
+    else:
+        compute_type = "int8"
 
     console.print(f"[dim]Transcription device : {trans_device} ({compute_type})[/dim]")
     console.print(f"[dim]Alignment/diarization: {torch_device}[/dim]")
@@ -153,8 +159,10 @@ def transcribe(
     model = whisperx.load_model(model_name, trans_device, compute_type=compute_type)
 
     audio = whisperx.load_audio(audio_path)
-    segments, language = _transcribe_with_progress(model, audio, trans_device)
-    console.print(f"[green]✓[/green] Detected language: [cyan]{language}[/cyan]")
+    if language:
+        console.print(f"[dim]Language: {language} (specified)[/dim]")
+    segments, language = _transcribe_with_progress(model, audio, trans_device, language)
+    console.print(f"[green]✓[/green] Language: [cyan]{language}[/cyan]")
 
     # --- Alignment ---
     with Status("[bold]Aligning transcription…[/bold]", console=console):
